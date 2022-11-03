@@ -95,20 +95,26 @@
   lockfree list. 
 *)
 
+type 'a cell = {
+  turn : int Atomic.t; 
+  value : 'a Option.t ref;
+}
+
 type 'a t = {
-  array : 'a Option.t Atomic.t Array.t;
+  array : 'a cell Array.t;
   head : int Atomic.t;
   tail : int Atomic.t;
   mask : int;
+  size_exponent : int;
 }
 
 let create ~size_exponent () : 'a t =
   let size = 1 lsl size_exponent in
-  let array = Array.init size (fun _ -> Atomic.make None) in
+  let array = Array.init size (fun _ -> ({turn = Atomic.make 0; value = ref None} : 'a cell)) in
   let mask = size - 1 in
   let head = Atomic.make 0 in
   let tail = Atomic.make 0 in
-  { array; head; tail; mask }
+  { array; head; tail; mask; size_exponent }
 
 (* [spin_threshold] Number of times on spin on a slot before trying an exit strategy. *)
 let spin_threshold = 30
@@ -124,79 +130,97 @@ let time_to_try_push_forward n = n mod try_other_exit_every_n == 0
 let ccas cell seen v =
   if Atomic.get cell != seen then false else Atomic.compare_and_set cell seen v
 
-let push { array; tail; head; mask; _ } item =
+
+let wait_for_turn current_turn (wanted_turn : int) = 
+  let i = ref 0 in 
+  let current_turn_val = ref (Atomic.get current_turn) in 
+  while !i < spin_threshold && !current_turn_val != wanted_turn do
+    i := !i + 1;
+    current_turn_val := Atomic.get current_turn;
+  done;
+  if !current_turn_val = wanted_turn then 
+    `Observed_wanted_turn 
+  else 
+    `Timed_out 
+;;
+
+let push { array; tail; head; mask; size_exponent; _ } item =
   let tail_val = Atomic.fetch_and_add tail 1 in
   let index = tail_val land mask in
   let cell = Array.get array index in
-
+  let wanted_turn = (tail_val lsr size_exponent) * 2 in 
   (* spin for a bit *)
-  let i = ref 0 in
-  while
-    !i < spin_threshold && not (Atomic.compare_and_set cell None (Some item))
-  do
-    i := !i + 1
-  done;
-
-  (* define clean up function *)
-  let rec take_or_rollback nth_attempt =
-    if Atomic.compare_and_set cell None (Some item) then
-      (* succedded to push *)
-      true
-    else if ccas tail (tail_val + 1) tail_val then (* rolled back tail *)
-      false
-    else if
-      time_to_try_push_forward nth_attempt && ccas head tail_val (tail_val + 1)
-    then (* pushed forward head *)
-      false
-    else (* retry *)
-      take_or_rollback (nth_attempt + 1)
+  let place_item () = 
+    assert (Option.is_none !(cell.value));
+    cell.value := Some item;
+    Atomic.set cell.turn (wanted_turn + 1);
   in
+  match wait_for_turn cell.turn wanted_turn with 
+  | `Observed_wanted_turn -> 
+    (place_item ();
+    true)
+  | `Timed_out -> 
+    let rec take_or_rollback nth_attempt =
+      if Atomic.get cell.turn = wanted_turn then
+        (place_item ();
+        true)
+      else if ccas tail (tail_val + 1) tail_val then (* rolled back tail *)
+        false
+      else if
+        time_to_try_push_forward nth_attempt && ccas head tail_val (tail_val + 1)
+      then (* pushed forward head *)
+        false
+      else (* retry *)
+        take_or_rollback (nth_attempt + 1)
+    in
+    take_or_rollback 0
 
-  (* if succeeded return true otherwise clean up *)
-  if !i < spin_threshold then true else take_or_rollback 0
-
-let take_item cell =
-  let value = Atomic.get cell in
-  if Option.is_some value && Atomic.compare_and_set cell value None then value
-  else None
 
 let pop queue =
-  let ({ array; head; tail; mask; _ } : 'a t) = queue in
+  let ({ array; head; tail; mask; size_exponent; _ } : 'a t) = queue in
   let head_value = Atomic.get head in
   let tail_value = Atomic.get tail in
   if head_value - tail_value >= 0 then None
   else
-    let old_head = Atomic.fetch_and_add head 1 in
-    let cell = Array.get array (old_head land mask) in
+    let old_head_val = Atomic.fetch_and_add head 1 in
+    let cell = Array.get array (old_head_val land mask) in
+    let wanted_turn = (old_head_val lsr size_exponent) * 2 + 1 in 
+    let take_item () = 
+      let item = !(cell.value) in 
+      assert (Option.is_some item);
+      
+      (* remove ref for gc *)
+      cell.value := None;
 
-    (* spin for a bit *)
-    let i = ref 0 in
-    let item = ref None in
-    while !i < spin_threshold && not (Option.is_some !item) do
-      item := take_item cell;
-      i := !i + 1
-    done;
-
-    (* define clean up function *)
-    let rec take_or_rollback nth_attempt =
-      let value = Atomic.get cell in
-      if Option.is_some value && Atomic.compare_and_set cell value None then
-        (* dequeued an item, return it *)
-        value
-      else if ccas head (old_head + 1) old_head then (* rolled back head *)
-        None
-      else if
-        time_to_try_push_forward nth_attempt && ccas tail old_head (old_head + 1)
-      then (* pushed tail forward *)
-        None
-      else take_or_rollback (nth_attempt + 1)
+      (* release the ownership *)
+      Atomic.set cell.turn (wanted_turn + 1);
+      item
     in
-
-    (* return if got item, clean up otherwise *)
-    if Option.is_some !item then !item else take_or_rollback 0
+    (* spin for a bit *)
+    match wait_for_turn cell.turn wanted_turn with 
+    | `Observed_wanted_turn ->  
+      (* take item *)
+      take_item ()
+    | `Timed_out -> 
+      let rec take_or_rollback nth_attempt =
+        if Atomic.get cell.turn = wanted_turn  then
+          take_item ()
+        else if ccas head (old_head_val + 1) old_head_val then (* rolled back head *)
+          None
+        else if
+          time_to_try_push_forward nth_attempt && ccas tail old_head_val (old_head_val + 1)
+        then (* pushed tail forward *)
+          None
+        else take_or_rollback (nth_attempt + 1)
+      in
+      take_or_rollback 0
+  ;;
 
 module CAS_interface = struct
-  let rec push ({ array; tail; head; mask; _ } as t) item =
+  let  push _ _ = assert false
+  let  pop _ = assert false
+
+(*  let rec push ({ array; tail; head; mask; _ } as t) item =
     let tail_val = Atomic.get tail in
     let head_val = Atomic.get head in
     let size = mask + 1 in
@@ -240,6 +264,5 @@ module CAS_interface = struct
         item := Atomic.get cell
       done;
       !item)
-    else pop t
+    else pop t*)
 end
-

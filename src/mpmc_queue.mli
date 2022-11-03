@@ -4,11 +4,17 @@
     order. 
 *)
 
-type 'a t = private {
-  array : 'a Option.t Atomic.t Array.t;
+type 'a cell = {
+  turn : int Atomic.t; 
+  value : 'a Option.t ref;
+}
+
+type 'a t = {
+  array : 'a cell Array.t;
   head : int Atomic.t;
   tail : int Atomic.t;
   mask : int;
+  size_exponent : int;
 }
 (** A queue of items of type ['a]. Implementation exposed for testing. *)
 

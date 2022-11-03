@@ -93,8 +93,9 @@ let run_test num_takers num_pushers () =
   Alcotest.(check int) "hd an tl match" head_val tail_val;
   Array.iter
     (fun item ->
+      let ({value; _} : 'a Mpmc_queue.cell) = item in
       Alcotest.(check (option int))
-        "ghost item in the queue!" None (Atomic.get item))
+        "ghost item in the queue!" None (!value))
     array
 
 let () =
@@ -112,7 +113,7 @@ let () =
           test_case " 8 prod. 1 cons." `Slow (run_test 8 1);
           test_case " 1 prod. 8 cons." `Slow (run_test 1 8);
         ] );
-    ]
+    ](*
     @
     let open Mpmc_queue.CAS_interface in
     [
@@ -120,4 +121,7 @@ let () =
         [ test_case "is it a queue" `Quick (smoke_test (push, pop)) ] );
       ( "validate items-CAS-intf",
         [ test_case "1 prod. 1 cons." `Quick (two_threads_test (push, pop)) ] );
-    ])
+    ]
+    
+    *)
+    )

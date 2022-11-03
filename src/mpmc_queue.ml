@@ -124,7 +124,7 @@ let spin_threshold = 30
    than "push forward", as the latter adds contention to the side that might already not
    be keeping up. *)
 let try_other_exit_every_n = 10
-let time_to_try_push_forward n = n mod try_other_exit_every_n == 0
+let _time_to_try_push_forward n = n mod try_other_exit_every_n == 0
 
 (* [ccas] A slightly nicer CAS. Tries without taking microarch lock first. Use on indices. *)
 let ccas cell seen v =
@@ -144,11 +144,11 @@ let wait_for_turn current_turn (wanted_turn : int) =
     `Timed_out 
 ;;
 
-let push { array; tail; head; mask; size_exponent; _ } item =
+let push { array; tail; head = _; mask; size_exponent; _ } item =
   let tail_val = Atomic.fetch_and_add tail 1 in
   let index = tail_val land mask in
   let cell = Array.get array index in
-  let wanted_turn = (tail_val lsr size_exponent) * 2 in 
+  let wanted_turn = (Sys.opaque_identity (tail_val lsr size_exponent)) * 2 in 
   (* spin for a bit *)
   let place_item () = 
     assert (Option.is_none !(cell.value));
@@ -161,16 +161,16 @@ let push { array; tail; head; mask; size_exponent; _ } item =
     true)
   | `Timed_out -> 
     let rec take_or_rollback nth_attempt =
-      if Atomic.get cell.turn = wanted_turn then
+      if (Atomic.get cell.turn) = wanted_turn then
         (place_item ();
         true)
       else if ccas tail (tail_val + 1) tail_val then (* rolled back tail *)
         false
-      else if
+      (* else if
         time_to_try_push_forward nth_attempt && ccas head tail_val (tail_val + 1)
       then (* pushed forward head *)
-        false
-      else (* retry *)
+        false*)
+      else (* retry *) 
         take_or_rollback (nth_attempt + 1)
     in
     take_or_rollback 0
@@ -178,13 +178,11 @@ let push { array; tail; head; mask; size_exponent; _ } item =
 
 let pop queue =
   let ({ array; head; tail; mask; size_exponent; _ } : 'a t) = queue in
-  let head_value = Atomic.get head in
-  let tail_value = Atomic.get tail in
-  if head_value - tail_value >= 0 then None
+  if Atomic.get head - Atomic.get tail >= 0 then None
   else
-    let old_head_val = Atomic.fetch_and_add head 1 in
-    let cell = Array.get array (old_head_val land mask) in
-    let wanted_turn = (old_head_val lsr size_exponent) * 2 + 1 in 
+    let head_val = Atomic.fetch_and_add head 1 in
+    let cell = Array.get array (head_val land mask) in
+    let wanted_turn = (Sys.opaque_identity (head_val lsr size_exponent)) * 2 + 1 in 
     let take_item () = 
       let item = !(cell.value) in 
       assert (Option.is_some item);
@@ -205,12 +203,12 @@ let pop queue =
       let rec take_or_rollback nth_attempt =
         if Atomic.get cell.turn = wanted_turn  then
           take_item ()
-        else if ccas head (old_head_val + 1) old_head_val then (* rolled back head *)
+        else if ccas head (head_val + 1) head_val then (* rolled back head *)
           None
-        else if
-          time_to_try_push_forward nth_attempt && ccas tail old_head_val (old_head_val + 1)
+        (* else if
+          time_to_try_push_forward nth_attempt && ccas tail head_val (head_val + 1)
         then (* pushed tail forward *)
-          None
+          None *)
         else take_or_rollback (nth_attempt + 1)
       in
       take_or_rollback 0

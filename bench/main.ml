@@ -2,20 +2,20 @@ let backoff_benchmarks =
   let open Backoff in
   [
     bench_basic ~with_backoff:true;
-    bench_basic ~with_backoff:false;
-    bench_artificial ~with_backoff:true;
-    bench_artificial ~with_backoff:false;
+    (* bench_basic ~with_backoff:false; *)
+    (* bench_artificial ~with_backoff:true; *)
+    (* bench_artificial ~with_backoff:false; *)
   ]
 
 let benchmark_list =
   [
     Bench_spsc_queue.bench;
-    Mpmc_queue.bench ~takers:4 ~pushers:4;
-    Mpmc_queue.bench ~takers:1 ~pushers:8;
+    Mpmc_queue.bench ~takers:2 ~pushers:2 ~elements:300_000;
+    (* Mpmc_queue.bench ~takers:1 ~pushers:8;
     Mpmc_queue.bench ~takers:8 ~pushers:1;
     Mpmc_queue.bench ~use_cas:true ~takers:4 ~pushers:4;
     Mpmc_queue.bench ~use_cas:true ~takers:1 ~pushers:8;
-    Mpmc_queue.bench ~use_cas:true ~takers:8 ~pushers:1;
+    Mpmc_queue.bench ~use_cas:true ~takers:8 ~pushers:1; *)
   ]
   @ backoff_benchmarks
 
